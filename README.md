@@ -92,6 +92,8 @@ Pada tiap client input command
 echo "nameserver 192.168.122.1" > /etc/resolv.conf
 `
 
+<img width="964" height="60" alt="image" src="https://github.com/user-attachments/assets/d871806d-823e-4c28-af34-f64fd030ed21" />
+
 ## Soal 4
 ns1: Deklarasi zona master berisi SOA, NS, A apex (→ Sirion), A ns1 & A ns2, aktifkan notify/transfer, set forwarders.
 ns2: Deklarasi zona slave yang menarik dari ns1 dan menyimpan salinan di cache.
@@ -174,6 +176,8 @@ named -4 -u bind -c /etc/bind/named.conf && \
 echo "== SOA ns1 ==" && dig +norecurse @127.0.0.1 k40.com SOA +short || true
 ```
 
+<img width="837" height="125" alt="image" src="https://github.com/user-attachments/assets/3c7d26e9-95be-4d73-8ea6-e5ed5e9bf126" />
+
 Kemudian pada Velmar masukan code berikut untuk transfer
 ```
 apt update && apt install -y bind9 bind9utils dnsutils && \
@@ -205,6 +209,8 @@ sleep 2 && \
 echo "== Cek file zona slave ==" && ls -l /var/cache/bind | grep db.k40.com || echo "(belum ada: pastikan ns1 allow-transfer/notify & konektivitas TCP/UDP 53)" && \
 echo "== SOA ns1 vs ns2 ==" && dig +norecurse @192.231.3.2 k40.com SOA +short && dig +norecurse @192.231.3.3 k40.com SOA +short
 ```
+
+<img width="846" height="178" alt="image" src="https://github.com/user-attachments/assets/94bcf1de-cd08-47c3-9e0f-e4b226c684e5" />
 
 ## Soal 5
 Set /etc/hostname di masing-masing host (eonwe, earendil, elwing, cirdan, elrond, maglor, lindon, vingilot, sirion). Pada ns1, tambahkan A record sesuai nama-nama tersebut. Node DNS direpresentasikan sebagai ns1.k40.com & ns2.k40.com (bukan tirion/valmar).
@@ -244,6 +250,8 @@ hostname
 echo "Hosts lookup for this node:"
 getent hosts [client].k40.com || true
 ```
+
+<img width="662" height="291" alt="image" src="https://github.com/user-attachments/assets/c2eda04f-7f1d-49d7-a76f-1f2eea096178" />
 
 Kemudian pada ns1 (Tirion) masukkan sebagai berikut:
 1. Setup
@@ -374,6 +382,8 @@ named -4 -u bind -c /etc/bind/named.conf && \
 echo "== SOA ns1 ==" && dig +norecurse @127.0.0.1 k40.com SOA +short
 ```
 
+<img width="861" height="143" alt="image" src="https://github.com/user-attachments/assets/3e37f8ad-359f-4584-af49-dbf230dbd3ee" />
+
 Kemudian pada velmar masukkan script berikut untuk menyiapkan server DNS slave (Valmar ns2), datanya disalin dari server master Tirion (ns1) dengan IP 192.231.3.2. DNS slave bertugas sebagai backup server DNS.
 ```
 #!/usr/bin/env bash
@@ -434,6 +444,8 @@ echo -n "ns2: " && dig +norecurse @192.231.3.3 k40.com SOA +short
 
 echo "[DONE] DNS Slave Valmar siap. Pastikan serial ns1 ==7 ns2 (sama)."
 ```
+
+<img width="908" height="176" alt="image" src="https://github.com/user-attachments/assets/840594d5-7757-46e0-911c-cd5aee2a81f2" />
 
 ## Soal 7
 Tambahkan A/CNAME di ns1, naikkan serial, dan pastikan ns2 menarik perubahan.
