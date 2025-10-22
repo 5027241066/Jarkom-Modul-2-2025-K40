@@ -1398,6 +1398,238 @@ Dengan output sebagai berikut:
 <img width="910" height="233" alt="image" src="https://github.com/user-attachments/assets/c4053a8c-180f-4a2e-a5b2-8d2c0d737f7d" />
 
 ## Soal 18
+Edit file zona /etc/bind/jarkom/db.k40.com untuk menambahkan record TXT dan CNAME, serta menaikkan nomor serial SOA menjadi 4.
+```
+# Di Tirion
+# nano /etc/bind/jarkom/db.k40.com
+# Ganti isinya menjadi:
+cat > /etc/bind/jarkom/db.k40.com <<EOF
+\$TTL    604800
+@       IN      SOA     ns1.k40.com. root.k40.com. (
+                              4         ; Serial
+                         604800         ; Refresh
+                          86400         ; Retry
+                        2419200         ; Expire
+                         604800 )       ; Negative Cache TTL
+;
+@       IN      NS      ns1.k40.com.
+@       IN      NS      ns2.k40.com.
 
+k40.com.        IN      A       192.231.3.6
+ns1             IN      A       192.231.3.2
+ns2             IN      A       192.231.3.3
+sirion          IN      A       192.231.3.6
+lindon      30  IN      A       192.231.3.40
+vingilot        IN      A       192.231.3.5
 
+www             IN      CNAME   sirion.k40.com.
+static      30  IN      CNAME   lindon.k40.com.
+app             IN      CNAME   vingilot.k40.com.
 
+melkor          IN      TXT     "Morgoth (Melkor)"
+morgoth         IN      CNAME   melkor.k40.com.
+EOF
+
+service named restart
+```
+Verifikasi kembali di terminal elrond:
+```
+# Di Elrond
+# 1. Verifikasi TXT record
+dig melkor.k40.com TXT
+
+# 2. Verifikasi CNAME (alias)
+dig morgoth.k40.com
+```
+Dengan output seperti berikut:
+
+<img width="1126" height="635" alt="image" src="https://github.com/user-attachments/assets/15d60d9d-46dd-4c76-8b8a-673d44a0754e" />
+
+<img width="1023" height="599" alt="image" src="https://github.com/user-attachments/assets/9ce211e8-ed3b-47fe-b106-b77a907a8a4c" />
+
+## Soal 19
+Edit file zona /etc/bind/jarkom/db.k40.com untuk menambahkan CNAME record havens dan menaikkan nomor serial SOA menjadi 5.
+```
+# Di Tirion
+# nano /etc/bind/jarkom/db.k40.com
+# Ganti isinya menjadi:
+cat > /etc/bind/jarkom/db.k40.com <<EOF
+\$TTL    604800
+@       IN      SOA     ns1.k40.com. root.k40.com. (
+                              5         ; Serial
+                         604800         ; Refresh
+                          86400         ; Retry
+                        2419200         ; Expire
+                         604800 )       ; Negative Cache TTL
+;
+@       IN      NS      ns1.k40.com.
+@       IN      NS      ns2.k40.com.
+
+k40.com.        IN      A       192.231.3.6
+ns1             IN      A       192.231.3.2
+ns2             IN      A       192.231.3.3
+sirion          IN      A       192.231.3.6
+lindon      30  IN      A       192.231.3.40
+vingilot        IN      A       192.231.3.5
+
+www             IN      CNAME   sirion.k40.com.
+static      30  IN      CNAME   lindon.k40.com.
+app             IN      CNAME   vingilot.k40.com.
+
+melkor          IN      TXT     "Morgoth (Melkor)"
+morgoth         IN      CNAME   melkor.k40.com.
+
+havens          IN      CNAME   www.k40.com.
+EOF
+
+service named restart
+```
+Edit file konfigurasi Nginx /etc/nginx/sites-available/reverse_proxy untuk menambahkan havens.k40.com ke direktif server_name dan memperbarui kondisi if agar tidak mengalihkan hostname baru ini.
+```
+# Di Sirion
+# nano /etc/nginx/sites-available/reverse_proxy
+# Ganti isinya menjadi:
+cat > /etc/nginx/sites-available/reverse_proxy <<EOF
+server {
+    listen 80 default_server;
+    server_name www.k40.com sirion.k40.com havens.k40.com;
+
+    if (\$host !~* ^(www|havens)\.k40\.com$) {
+        return 301 http://www.k40.com\$request_uri;
+    }
+
+    location /admin {
+        auth_basic "Restricted Content";
+        auth_basic_user_file /etc/nginx/.htpasswd;
+        proxy_pass http://192.231.3.5/;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
+    location /static/ {
+        proxy_pass http://192.231.3.4/;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
+    location /app/ {
+        proxy_pass http://192.231.3.5/;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+EOF
+
+service nginx restart
+```
+Verifikasi di 2 terminal berbeda misal elrond dan cirdan:
+```
+# Di Elrond
+dig havens.k40.com
+curl http://havens.k40.com/app/
+
+# Di elwing
+dig havens.k40.com
+curl http://havens.k40.com/static/annals/
+```
+Dengan output sebagai berikut:
+
+<img width="1005" height="666" alt="image" src="https://github.com/user-attachments/assets/ae0debce-9e30-41e8-ae4e-d75db3aee3d6" />
+
+<img width="907" height="203" alt="image" src="https://github.com/user-attachments/assets/ae03be44-45cb-4705-a4d2-d712cc8b0e20" />
+
+<img width="1014" height="767" alt="image" src="https://github.com/user-attachments/assets/1d500a36-f34a-4dea-9898-db30a3f26a5e" />
+
+## Soal 20
+Di sirion, membuat direktori /var/www/html dan file index.html dengan konten yang ditentukan. Kemudian, memodifikasi konfigurasi Nginx (/etc/nginx/sites-available/reverse_proxy) untuk menambahkan blok location / yang menyajikan file index.html dari direktori tersebut.
+```
+# Di Sirion
+mkdir -p /var/www/html
+
+# Buat file index.html
+cat > /var/www/html/index.html <<EOF
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>War of Wrath</title>
+</head>
+<body>
+    <h1>War of Wrath: Lindon bertahan</h1>
+    <p>Silakan telusuri tautan di bawah ini:</p>
+    <ul>
+        <li><a href="/static/annals/">Arsip di Lindon (/static)</a></li>
+        <li><a href="/app/">Kisah di Vingilot (/app)</a></li>
+    </ul>
+</body>
+</html>
+EOF
+
+# Edit konfigurasi Nginx
+# nano /etc/nginx/sites-available/reverse_proxy
+# Tambahkan blok location / { ... }
+cat > /etc/nginx/sites-available/reverse_proxy <<EOF
+server {
+    listen 80 default_server;
+    server_name www.k40.com sirion.k40.com havens.k40.com;
+
+    if (\$host !~* ^(www|havens)\.k40\.com$) {
+        return 301 http://www.k40.com\$request_uri;
+    }
+
+    # Lokasi untuk root (halaman depan)
+    location / {
+        root /var/www/html;
+        index index.html;
+    }
+
+    location /admin {
+        auth_basic "Restricted Content";
+        auth_basic_user_file /etc/nginx/.htpasswd;
+        proxy_pass http://192.231.3.5/;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
+    location /static/ {
+        proxy_pass http://192.231.3.4/;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
+    location /app/ {
+        proxy_pass http://192.231.3.5/;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+EOF
+
+nginx -t
+service nginx restart
+```
+Lalu verifikasi misal di elrond dan maglor:
+```
+# Di Elrond
+curl http://www.k40.com/
+
+# Di maglor
+curl http://www.k40.com/
+```
+Dengan output sebagai berikut:
+
+<img width="1030" height="493" alt="image" src="https://github.com/user-attachments/assets/482a6b56-91fb-49a1-9a71-bb992ee63d89" />
+
+<img width="1027" height="487" alt="image" src="https://github.com/user-attachments/assets/08ec3d11-bc2d-4a01-a20d-0837332d0b62" />
