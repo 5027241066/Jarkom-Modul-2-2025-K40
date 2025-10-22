@@ -1,4 +1,4 @@
-# Laporan Resmi Jarkom-Modul-2-2025-K40
+<img width="1055" height="566" alt="image" src="https://github.com/user-attachments/assets/f9a70dd1-8d91-41fb-844b-2d0362eabe06" /># Laporan Resmi Jarkom-Modul-2-2025-K40
 ## Anggota Kelompok
 
 | No | Nama                   | NRP         |
@@ -316,13 +316,234 @@ echo "Please bump the SOA serial in $ZFILE, then reload:"
 echo "  named-checkzone k40.com $ZFILE && pkill named 2>/dev/null || true; named -4 -u bind -c /etc/bind/named.conf"
 ```
 
+Kemudian pada ns2 (Valmar) masukkan code berikut:
+```
+#!/usr/bin/env bash
+
+# Write /etc/hosts with FQDN and shortname (plus localhost conventions)
+cat >/etc/hosts <<'EOF'
+127.0.0.1   localhost
+127.0.1.1   ns2.k40.com valmar
+192.231.3.3 ns2.k40.com valmar
+EOF
+
+# Preferred resolver order: ns1 -> ns2 -> NAT forwarder
+cat >/etc/resolv.conf <<'DNS'
+nameserver 192.231.3.2   # ns1.k40.com (Tirion)
+nameserver 192.231.3.3   # ns2.k40.com (Valmar)
+nameserver 192.168.122.1 # fallback
+DNS
+
+# Persist resolv.conf across reboots on minimal nodes
+cat >/etc/rc.local <<'RC'
+#!/bin/sh
+cat >/etc/resolv.conf <<DNS
+nameserver 192.231.3.2
+nameserver 192.231.3.3
+nameserver 192.168.122.1
+DNS
+exit 0
+RC
+
+# Quick verification
+echo "Hostname now:"
+hostname
+echo "Hosts lookup for this node:"
+getent hosts ns2.k40.com || true
+
+```
 ## Soal 6
 Naikkan serial SOA di ns1 setiap perubahan dan paksa ns2 melakukan retransfer bila belum sinkron.
 
 Pada tirion masukkan script berikut
 ```
+#!/usr/bin/env bash
+set -euo pipefail
+export PATH="/usr/sbin:/sbin:/usr/bin:/bin:$PATH"
+export DEBIAN_FRONTEND=noninteractive
+
+# --- Auto install ---
+if ! dpkg -s bind9 >/dev/null 2>&1; then
+  apt-get update
+  apt-get install -y bind9 bind9utils dnsutils
+fi
+
+DOMAIN="${1:-k40.com}"
+ZONEFILE="/etc/bind/db.${DOMAIN}"
+NS1_HOST="${NS1_HOST:-ns1}"
+NS2_HOST="${NS2_HOST:-ns2}"
+NS1_IP="${NS1_IP:-192.231.3.2}"
+NS2_IP="${NS2_IP:-192.231.3.3}"
+FORWARDER="${FORWARDER:-192.168.122.1}"
+
+TODAY="$(date +%Y%m%d)"
+SERIAL="${TODAY}03"   # paksa …03
+
+named_bin="$(command -v named || true)"; [[ -z "$named_bin" ]] && named_bin="/usr/sbin/named"
+
+echo "[ns1] Setup master zone untuk ${DOMAIN} (serial ${SERIAL})"
+
+mkdir -p /etc/bind /var/cache/bind
+
+# options
+cat >/etc/bind/named.conf.options <<EOF
+options {
+    directory "/var/cache/bind";
+    recursion yes;
+    allow-query { any; };
+    listen-on { any; };
+    listen-on-v6 { any; };
+    dnssec-validation no;
+    forwarders { ${FORWARDER}; };
+    auth-nxdomain no;
+};
+EOF
+
+# master zone
+cat >/etc/bind/named.conf.local <<EOF
+zone "${DOMAIN}" {
+    type master;
+    file "${ZONEFILE}";
+    notify yes;
+    also-notify { ${NS2_IP}; };
+    allow-transfer { ${NS2_IP}; };
+};
+EOF
+
+# zone file (buat jika belum ada)
+if [[ ! -f "${ZONEFILE}" ]]; then
+cat >"${ZONEFILE}" <<ZONE
+\$TTL 3600
+\$ORIGIN ${DOMAIN}.
+@   IN  SOA ${NS1_HOST}.${DOMAIN}. admin.${DOMAIN}. (
+        ${SERIAL} ; SERIAL
+        3600      ; refresh
+        900       ; retry
+        1209600   ; expire
+        300 )     ; minimum
+    IN  NS  ${NS1_HOST}.${DOMAIN}.
+    IN  NS  ${NS2_HOST}.${DOMAIN}.
+
+${NS1_HOST} IN  A   ${NS1_IP}
+${NS2_HOST} IN  A   ${NS2_IP}
+ZONE
+else
+  # bump SERIAL jadi YYYYMMDD02 (tanpa perl)
+  awk -v serial="$SERIAL" '
+    BEGIN{done=0; sawSOA=0}
+    /IN[ \t]+SOA/ {sawSOA=1}
+    {
+      if (sawSOA && !done) {
+        if (sub(/[0-9]{10}/, serial)) { done=1; sawSOA=0 }
+      }
+      print
+    }
+  ' "$ZONEFILE" > "${ZONEFILE}.tmp" && mv "${ZONEFILE}.tmp" "$ZONEFILE"
+fi
+
+# checks (opsional)
+if command -v named-checkconf >/dev/null 2>&1; then named-checkconf; fi
+if command -v named-checkzone >/dev/null 2>&1; then named-checkzone "${DOMAIN}" "${ZONEFILE}"; fi
+
+# reload/start
+if command -v rndc >/dev/null 2>&1; then
+  rndc reload || true
+else
+  pkill named 2>/dev/null || true
+  "$named_bin" -4 -u bind -c /etc/bind/named.conf
+fi
+
+if command -v dig >/dev/null 2>&1; then
+  echo "[ns1] SOA (ns1):"; dig +norecurse @"${NS1_IP}" "${DOMAIN}" SOA +short || true
+fi
+```
+
+<img width="910" height="183" alt="image" src="https://github.com/user-attachments/assets/312237a7-7d06-4426-8b86-aa9d165ec7fb" />
+
+Kemudian pada velmar masukkan script berikut untuk menyiapkan server DNS slave (Valmar ns2), datanya disalin dari server master Tirion (ns1) dengan IP 192.231.3.2. DNS slave bertugas sebagai backup server DNS.
+```
+#!/usr/bin/env bash
+set -euo pipefail
+export PATH="/usr/sbin:/sbin:/usr/bin:/bin:$PATH"
+export DEBIAN_FRONTEND=noninteractive
+
+# --- Auto install ---
+if ! dpkg -s bind9 >/dev/null 2>&1; then
+  apt-get update
+  apt-get install -y bind9 bind9utils dnsutils
+fi
+
+DOMAIN="${1:-k40.com}"
+SLAVEFILE="/var/cache/bind/db.${DOMAIN}"
+NS1_IP="${NS1_IP:-192.231.3.2}"
+NS2_IP="${NS2_IP:-192.231.3.3}"
+
+named_bin="$(command -v named || true)"; [[ -z "$named_bin" ]] && named_bin="/usr/sbin/named"
+
+echo "[ns2] Setup slave zone untuk ${DOMAIN}"
+
+mkdir -p /etc/bind /var/cache/bind
+chown -R bind:bind /var/cache/bind
+
+# slave zone
+cat >/etc/bind/named.conf.local <<EOF
+zone "${DOMAIN}" {
+    type slave;
+    file "${SLAVEFILE}";
+    masters { ${NS1_IP}; };
+    allow-notify { ${NS1_IP}; };
+};
+EOF
+
+# opsi basic
+cat >/etc/bind/named.conf.options <<'EOF'
+options {
+    directory "/var/cache/bind";
+    recursion yes;
+    allow-query { any; };
+    listen-on { any; };
+    listen-on-v6 { any; };
+    dnssec-validation no;
+    auth-nxdomain no;
+};
+EOF
+
+# fresh pull
+rm -f "${SLAVEFILE}"* 2>/dev/null || true
+chown -R bind:bind /var/cache/bind
+
+# checks (opsional)
+if command -v named-checkconf >/dev/null 2>&1; then named-checkconf; fi
+
+# reload/start
+if command -v rndc >/dev/null 2>&1; then
+  rndc reload || { pkill named 2>/dev/null || true; "$named_bin" -4 -u bind -c /etc/bind/named.conf; }
+  rndc retransfer "${DOMAIN}" || true
+else
+  pkill named 2>/dev/null || true
+  "$named_bin" -4 -u bind -c /etc/bind/named.conf
+fi
+
+if command -v dig >/dev/null 2>&1; then
+  echo "[ns2] SOA (ns2):"; dig +norecurse @"${NS2_IP}" "${DOMAIN}" SOA +short || true
+fi
+```
+
+<img width="901" height="115" alt="image" src="https://github.com/user-attachments/assets/31ce16bd-8993-4597-9c6d-e2fc6241b95b" />
+
+## Soal 7
+Membuat zona utama untuk domain k40.com di server Tirion (ns1), kemudian membuat server slave di Valmar (ns2) agar data DNS tersinkronisasi secara otomatis. Zona ini berisi A record dan CNAME untuk host Sirion, Lindon, dan Vingilot.
+- www.<xxxx>.com → sirion.<xxxx>.com 
+- static.<xxxx>.com → lindon.<xxxx>.com 
+- app.<xxxx>.com → vingilot.<xxxx>.com 
+
+Tirion:
+File `named.conf.options` mengatur agar DNS menerima query dari semua jaringan, menggunakan forwarder 192.168.122.1, dan mengaktifkan rekursi. File `named.conf.local` mendeklarasikan zona k40.com sebagai master zone dengan izin transfer ke server slave Valmar. File zona db.k40.com berisi catatan SOA, NS, A, dan CNAME untuk sirion, lindon, vingilot, serta alias www, static, dan app. Setelah validasi konfigurasi, layanan named dijalankan ulang, lalu dilakukan uji dig untuk memastikan semua hostname telah ter-resolve dengan benar.
+
+```
 apt update && apt install -y bind9 bind9utils dnsutils && \
 mkdir -p /etc/bind /var/cache/bind && chown -R bind:bind /var/cache/bind && \
+
 cat >/etc/bind/named.conf.options <<'EOF'
 options {
     directory "/var/cache/bind";
@@ -335,6 +556,7 @@ options {
     dnssec-validation no;
 };
 EOF
+
 cat >/etc/bind/named.conf.local <<'EOF'
 zone "k40.com" {
     type master;
@@ -344,75 +566,79 @@ zone "k40.com" {
     allow-transfer { 192.231.3.3; };  // izinkan ns2 tarik zona
 };
 EOF
+
 cat >/etc/bind/db.k40.com <<'ZONE'
 $TTL 3600
 $ORIGIN k40.com.
 @   IN  SOA ns1.k40.com. admin.k40.com. (
-        2025101302  ; serial (Ymdnn) — naikkan tiap edit
+        2025102204  ; serial (Ymdnn) — naikkan setiap edit!
         3600        ; refresh
         900         ; retry
         604800      ; expire
         300 )       ; negative TTL
 
-; authoritative nameservers
+; NS authoritative
 @       IN  NS  ns1.k40.com.
 @       IN  NS  ns2.k40.com.
 
-; glue (A) untuk NS
-ns1     IN  A   192.231.3.2    ; Tirion
-ns2     IN  A   192.231.3.3    ; Valmar
+; Glue A untuk NS
+ns1     IN  A   192.231.3.2
+ns2     IN  A   192.231.3.3
 
-; apex (front door)
+; Apex (front door)
 @       IN  A   192.231.3.6    ; Sirion
 
-; (opsional) host lain sesuai glosarium
-eonwe    IN  A  192.231.3.1
-earendil IN  A  192.231.1.2
-elwing   IN  A  192.231.1.3
-cirdan   IN  A  192.231.2.2
-elrond   IN  A  192.231.2.3
-maglor   IN  A  192.231.2.4
+; Host layanan
+sirion   IN  A  192.231.3.6
 lindon   IN  A  192.231.3.4
 vingilot IN  A  192.231.3.5
-sirion   IN  A  192.231.3.6
+
+; CNAME
+www      IN  CNAME  sirion.k40.com.
+static   IN  CNAME  lindon.k40.com.
+app      IN  CNAME  vingilot.k40.com.
 ZONE
+
+# bersihkan CRLF/BOM jika ada, validasi & jalankan named
+sed -i "s/\r$//" /etc/bind/db.k40.com 2>/dev/null || true
+sed -i "1s/^\xEF\xBB\xBF//" /etc/bind/db.k40.com 2>/dev/null || true
 named-checkconf && named-checkzone k40.com /etc/bind/db.k40.com && \
-pkill named 2>/dev/null || true && \
-named -4 -u bind -c /etc/bind/named.conf && \
-echo "== SOA ns1 ==" && dig +norecurse @127.0.0.1 k40.com SOA +short
+pkill named 2>/dev/null || true && named -4 -u bind -c /etc/bind/named.conf && \
+sleep 1 && \
+echo "== SOA ns1 ==" && dig +norecurse @127.0.0.1 k40.com SOA +short && \
+echo "== A & CNAME (harus resolve ke IP target) ==" && \
+echo -n "apex:   " && dig +short @127.0.0.1 k40.com A && \
+echo -n "sirion: " && dig +short @127.0.0.1 sirion.k40.com A && \
+echo -n "lindon: " && dig +short @127.0.0.1 lindon.k40.com A && \
+echo -n "vingilot: " && dig +short @127.0.0.1 vingilot.k40.com A && \
+echo -n "www:    " && dig +short @127.0.0.1 www.k40.com A && \
+echo -n "static: " && dig +short @127.0.0.1 static.k40.com A && \
+echo -n "app:    " && dig +short @127.0.0.1 app.k40.com A
 ```
 
-<img width="861" height="143" alt="image" src="https://github.com/user-attachments/assets/3e37f8ad-359f-4584-af49-dbf230dbd3ee" />
+<img width="761" height="259" alt="image" src="https://github.com/user-attachments/assets/982f70d3-50c9-4ce0-85c7-d52d444b4db4" />
 
-Kemudian pada velmar masukkan script berikut untuk menyiapkan server DNS slave (Valmar ns2), datanya disalin dari server master Tirion (ns1) dengan IP 192.231.3.2. DNS slave bertugas sebagai backup server DNS.
+Valmar:
+Mengonfigurasi server DNS slave di Valmar (ns2) agar menyalin k40.com dari master Tirion. File `named.conf.options` diatur untuk menerima query dari semua jaringan dengan forwarder 192.168.122.1. Pada `named.conf.local`, zona k40.com dideklarasikan sebagai slave zone dengan master 192.231.3.2 dan lokasi penyimpanan salinan di `/var/cache/bind/db.k40.com`. Setelah layanan named dijalankan, skrip melakukan pengecekan SOA, serta memastikan seluruh A dan CNAME record di ns2 konsisten dengan data di ns1.
+
 ```
-#!/usr/bin/env bash
-echo "[+] Setup DNS Slave (Valmar - ns2) untuk k40.com"
+apt update && apt install -y bind9 bind9utils dnsutils && \
+mkdir -p /etc/bind /var/cache/bind && chown -R bind:bind /var/cache/bind && \
 
-# 1) Install paket
-apt update
-apt install -y bind9 bind9utils dnsutils
-
-# 2) Siapkan direktori & ownership yang benar untuk slave zone
-mkdir -p /etc/bind /var/cache/bind
-chown -R bind:bind /var/cache/bind
-
-# 3) Konfigurasi opsi global (forwarders sesuai soal sebelumnya bisa 192.168.122.1)
-cat > /etc/bind/named.conf.options <<'EOF'
+cat >/etc/bind/named.conf.options <<'EOF'
 options {
     directory "/var/cache/bind";
     listen-on { any; };
     listen-on-v6 { any; };
     allow-query { any; };
 
-    forwarders { 192.168.122.1; };  // bisa diganti/ditambah jika perlu
+    forwarders { 192.168.122.1; };
     recursion yes;
     dnssec-validation no;
 };
 EOF
 
-# 4) Daftarkan zona SLAVE (tarik dari ns1 = 192.231.3.2)
-cat > /etc/bind/named.conf.local <<'EOF'
+cat >/etc/bind/named.conf.local <<'EOF'
 zone "k40.com" {
     type slave;
     masters { 192.231.3.2; };            // Tirion (ns1)
@@ -421,31 +647,410 @@ zone "k40.com" {
 };
 EOF
 
-# 5) Validasi konfigurasi
-named-checkconf
-
-# 6) (opsional) Buka port DNS kalau ada iptables
-iptables -C INPUT -p udp --dport 53 -j ACCEPT 2>/dev/null || iptables -A INPUT -p udp --dport 53 -j ACCEPT 2>/dev/null || true
-iptables -C INPUT -p tcp --dport 53 -j ACCEPT 2>/dev/null || iptables -A INPUT -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
-
-# 7) Bersihkan salinan lama & jalankan named (tanpa systemd)
+# hapus salinan lama, start named, lalu cek
 rm -f /var/cache/bind/db.k40.com* /var/cache/bind/k40.com*.jnl 2>/dev/null || true
+named-checkconf || true
 pkill named 2>/dev/null || true
 named -4 -u bind -c /etc/bind/named.conf
-
-# 8) Tunggu sebentar & verifikasi
 sleep 2
-echo "[+] Mengecek file zona slave..."
-ls -l /var/cache/bind | grep db.k40.com || echo "[!] Belum ada salinan: cek allow-transfer/notify di ns1 dan konektivitas 53/TCP+UDP"
 
-echo "[+] Mengecek serial SOA ns1 & ns2..."
+echo "== File zona slave ==" && ls -l /var/cache/bind | grep db.k40.com || echo "(belum ada: cek allow-transfer/notify di ns1 & port 53/TCP+UDP)"
+
+echo "== SOA ns1 vs ns2 =="
 echo -n "ns1: " && dig +norecurse @192.231.3.2 k40.com SOA +short
 echo -n "ns2: " && dig +norecurse @192.231.3.3 k40.com SOA +short
 
-echo "[DONE] DNS Slave Valmar siap. Pastikan serial ns1 ==7 ns2 (sama)."
+echo "== A & CNAME via ns2 (harus konsisten dengan ns1) =="
+echo -n "apex:   " && dig +short @192.231.3.3 k40.com A
+echo -n "sirion: " && dig +short @192.231.3.3 sirion.k40.com A
+echo -n "lindon: " && dig +short @192.231.3.3 lindon.k40.com A
+echo -n "vingilot: " && dig +short @192.231.3.3 vingilot.k40.com A
+echo -n "www:    " && dig +short @192.231.3.3 www.k40.com A
+echo -n "static: " && dig +short @192.231.3.3 static.k40.com A
+echo -n "app:    " && dig +short @192.231.3.3 app.k40.com A
 ```
 
-<img width="908" height="176" alt="image" src="https://github.com/user-attachments/assets/840594d5-7757-46e0-911c-cd5aee2a81f2" />
+<img width="834" height="323" alt="image" src="https://github.com/user-attachments/assets/6ff0c0d9-bbef-45f0-a061-59c39c8b8ca5" />
 
-## Soal 7
-Tambahkan A/CNAME di ns1, naikkan serial, dan pastikan ns2 menarik perubahan.
+Kemudian dilakukan pengujian dari klien lain dengan menjalankan perintah ping ke CNAME yang telah dikonfigurasi sebelumnya.
+
+<img width="987" height="477" alt="image" src="https://github.com/user-attachments/assets/af8142ce-cb0a-4399-a212-f18c6cfd9199" />
+
+## Soal 8
+Membuat reverse zone agar setiap IP di segmen DMZ dapat dikonversi kembali ke hostname yang sesuai (PTR record).
+
+Tirion:
+Menambahkan reverse zone `3.231.192.in-addr.arpa` sebagai master zone di file konfigurasi `/etc/bind/named.conf.local`. Selanjutnya, dibuat file zona `/etc/bind/db.192.231.3` yang berisi PTR record untuk setiap host di jaringan DMZ, yaitu 4 yang mengarah ke lindon.k40.com, 5 ke vingilot.k40.com, dan 6 ke sirion.k40.com..
+
+```
+#!/usr/bin/env bash
+# Nomor 8 – Tirion (ns1/master)
+# Tambah reverse zone 192.231.3.0/24 => 3.231.192.in-addr.arpa TANPA menimpa zona forward k40.com
+set -euo pipefail
+export PATH="/usr/sbin:/sbin:/usr/bin:/bin:$PATH"
+export DEBIAN_FRONTEND=noninteractive
+
+NS2_IP="192.231.3.3"
+REV_ZONE="3.231.192.in-addr.arpa"
+REV_DIR="/etc/bind/rev"
+REV_FILE="${REV_DIR}/${REV_ZONE}"
+# Sesuaikan serial jika perlu (format YYYYMMDDns)
+SERIAL="2025102205"
+
+echo "[ns1] apt update & install bind tools"
+apt update -y
+apt install -y bind9 bind9utils dnsutils procps psmisc
+
+echo "[ns1] Pastikan named.conf meng-include opsi & lokal (idempotent)"
+# Ini aman—hanya memastikan include; tidak menyentuh named.conf.local (zona forward tetap)
+cat >/etc/bind/named.conf <<'EOF'
+include "/etc/bind/named.conf.options";
+include "/etc/bind/named.conf.local";
+EOF
+
+echo "[ns1] Opsi dasar BIND (idempotent)"
+cat >/etc/bind/named.conf.options <<'EOF'
+options {
+    directory "/var/cache/bind";
+    listen-on { any; };
+    listen-on-v6 { any; };
+    allow-query { any; };
+
+    forwarders { 192.168.122.1; };
+    recursion yes;
+    dnssec-validation no;
+};
+EOF
+
+echo "[ns1] Tambahkan blok zona REVERSE ke named.conf.local bila belum ada (tidak menimpa forward)"
+mkdir -p "${REV_DIR}"
+grep -q "zone \"${REV_ZONE}\"" /etc/bind/named.conf.local 2>/dev/null || cat >>/etc/bind/named.conf.local <<EOF
+
+zone "${REV_ZONE}" {
+    type master;
+    file "${REV_FILE}";
+    notify yes;
+    also-notify { ${NS2_IP}; };
+    allow-transfer { ${NS2_IP}; };
+};
+EOF
+
+echo "[ns1] Tulis file zona reverse (PTR untuk Lindon/ Vingilot/ Sirion)"
+cat >"${REV_FILE}" <<EOF
+\$TTL 3600
+@   IN  SOA ns1.k40.com. admin.k40.com. (
+        ${SERIAL} ; SERIAL (YYYYMMDDnn) — naikkan tiap edit
+        3600      ; refresh
+        900       ; retry
+        1209600   ; expire
+        300 )     ; negative TTL
+
+@   IN  NS  ns1.k40.com.
+@   IN  NS  ns2.k40.com.
+
+; PTR untuk DMZ
+4   IN  PTR lindon.k40.com.
+5   IN  PTR vingilot.k40.com.
+6   IN  PTR sirion.k40.com.
+EOF
+
+# Bersihkan newline Windows jika ada
+sed -i 's/\r$//' /etc/bind/named.conf /etc/bind/named.conf.options /etc/bind/named.conf.local "${REV_FILE}"
+
+echo "[ns1] Validasi & jalankan named tanpa systemctl"
+named-checkzone "${REV_ZONE}" "${REV_FILE}"
+named-checkconf -z
+
+# Stop, hapus jurnal, start
+(ps -eo pid,comm | awk '$2=="named"{print $1}' | xargs -r kill) || true
+rm -f "${REV_FILE}.jnl" /var/cache/bind/${REV_ZONE}*.jnl 2>/dev/null || true
+named -4 -u bind -c /etc/bind/named.conf &
+sleep 2
+
+echo "== SOA reverse @ns1 =="
+dig @127.0.0.1 ${REV_ZONE} SOA +short || true
+echo "== PTR @ns1 =="
+echo -n "192.231.3.4 -> "; dig +short @127.0.0.1 -x 192.231.3.4 || true
+echo -n "192.231.3.5 -> "; dig +short @127.0.0.1 -x 192.231.3.5 || true
+echo -n "192.231.3.6 -> "; dig +short @127.0.0.1 -x 192.231.3.6 || true
+
+echo "[ns1] Selesai (reverse master aktif tanpa mengganggu zona forward)."
+```
+
+<img width="933" height="358" alt="image" src="https://github.com/user-attachments/assets/2482c8ae-5343-4434-8925-2a8cacd337c5" />
+
+Valmar:
+
+```
+#!/usr/bin/env bash
+# Nomor 8 – Valmar (ns2/slave)
+# Tarik reverse zone 3.231.192.in-addr.arpa dari ns1 TANPA menimpa zona forward slave
+set -euo pipefail
+export PATH="/usr/sbin:/sbin:/usr/bin:/bin:$PATH"
+export DEBIAN_FRONTEND=noninteractive
+
+NS1_IP="192.231.3.2"
+REV_ZONE="3.231.192.in-addr.arpa"
+
+echo "[ns2] apt update & install bind tools"
+apt update -y
+apt install -y bind9 bind9utils dnsutils procps psmisc
+
+echo "[ns2] Pastikan named.conf meng-include opsi & lokal (idempotent)"
+cat >/etc/bind/named.conf <<'EOF'
+include "/etc/bind/named.conf.options";
+include "/etc/bind/named.conf.local";
+EOF
+
+echo "[ns2] Opsi dasar BIND (idempotent)"
+cat >/etc/bind/named.conf.options <<'EOF'
+options {
+    directory "/var/cache/bind";
+    listen-on { any; };
+    listen-on-v6 { any; };
+    allow-query { any; };
+
+    forwarders { 192.168.122.1; };
+    recursion yes;
+    dnssec-validation no;
+};
+EOF
+
+echo "[ns2] Tambahkan blok zona REVERSE SLAVE ke named.conf.local bila belum ada (tidak menimpa forward)"
+grep -q "zone \"${REV_ZONE}\"" /etc/bind/named.conf.local 2>/dev/null || cat >>/etc/bind/named.conf.local <<EOF
+
+zone "${REV_ZONE}" {
+    type slave;
+    masters { ${NS1_IP}; };
+    file "${REV_ZONE}";   // relative => tersimpan di /var/cache/bind/
+    allow-notify { ${NS1_IP}; };
+};
+EOF
+
+# Rapikan newline
+sed -i 's/\r$//' /etc/bind/named.conf /etc/bind/named.conf.options /etc/bind/named.conf.local
+
+echo "[ns2] Siapkan direktori & izin cache"
+mkdir -p /var/cache/bind
+chown -R bind:bind /var/cache/bind
+
+echo "[ns2] Validasi konfigurasi"
+named-checkconf -z
+
+echo "[ns2] Bersihkan salinan lama agar AXFR segar"
+rm -f /var/cache/bind/${REV_ZONE}* /var/lib/bind/${REV_ZONE}* 2>/dev/null || true
+
+echo "[ns2] Start named tanpa systemctl"
+(ps -eo pid,comm | awk '$2=="named"{print $1}' | xargs -r kill) || true
+named -4 -u bind -c /etc/bind/named.conf &
+sleep 3
+
+echo "== AXFR manual test dari ns1 =="
+dig @${NS1_IP} ${REV_ZONE} AXFR +tcp | head || true
+
+echo "== Cek file slave di cache =="
+ls -l /var/cache/bind/${REV_ZONE}* || echo "!! file belum terlihat — cek allow-transfer/notify di ns1 & TCP/UDP 53"
+
+echo "== SOA reverse @ns2 (harus sama dengan ns1) =="
+dig @127.0.0.1 ${REV_ZONE} SOA +short || true
+
+echo "== PTR @ns2 =="
+echo -n "192.231.3.4 -> "; dig +short @127.0.0.1 -x 192.231.3.4 || true
+echo -n "192.231.3.5 -> "; dig +short @127.0.0.1 -x 192.231.3.5 || true
+echo -n "192.231.3.6 -> "; dig +short @127.0.0.1 -x 192.231.3.6 || true
+
+echo "[ns2] Selesai (reverse slave aktif & tidak mengganggu forward slave)."
+```
+
+<img width="1055" height="566" alt="image" src="https://github.com/user-attachments/assets/c4609690-befc-4768-aa54-c6751ec3e949" />
+
+## Soal 9
+Modul Apache seperti autoindex dan rewrite diaktifkan untuk memungkinkan untuk menampilkan daftar file dan pembatasan akses. File VirtualHost static.k40.com.conf dibuat agar hanya mengizinkan akses melalui hostname static.k40.com atau lindon.k40.com, serta menampilkan listing direktori /annals. Setelah itu, situs baru diaktifkan dan Apache direstart agar konfigurasi berlaku.
+
+```
+# setup_lindon_static_k40.sh — Web statis di Lindon (192.231.3.4) untuk nomor 9
+apt update && apt install -y apache2 curl >/dev/null
+
+# Siapkan dokumen
+mkdir -p /var/www/static.k40.com/annals
+# contoh berkas isi (bukan index.html) agar listing tampil
+echo "Catatan kuno pertama" > /var/www/static.k40.com/annals/catatan1.txt
+echo "Catatan kuno kedua"   > /var/www/static.k40.com/annals/catatan2.txt
+# JANGAN bikin index.html di /annals kalau mau autoindex muncul
+rm -f /var/www/static.k40.com/annals/index.html 2>/dev/null || true
+
+chown -R www-data:www-data /var/www/static.k40.com
+
+# Aktifkan modul yang dibutuhkan
+a2enmod autoindex >/dev/null 2>&1 || true
+a2enmod rewrite   >/dev/null 2>&1 || true
+
+# Vhost
+cat >/etc/apache2/sites-available/static.k40.com.conf <<'EOF'
+<VirtualHost *:80>
+    ServerAdmin webmaster@static.k40.com
+    ServerName  static.k40.com
+    ServerAlias lindon.k40.com
+    DocumentRoot /var/www/static.k40.com
+
+    # Wajib: /annals menampilkan listing direktori
+    <Directory /var/www/static.k40.com/annals>
+        Options +Indexes
+        AllowOverride None
+        Require all granted
+        # (opsional) tampilkan listing yg lebih rapi
+        IndexOptions FancyIndexing FoldersFirst NameWidth=* SuppressDescription
+    </Directory>
+
+    # Wajib: akses hanya via hostname (bukan IP / host lain)
+    RewriteEngine On
+    RewriteCond %{HTTP_HOST} !^static\.k40\.com$ [NC]
+    RewriteCond %{HTTP_HOST} !^lindon\.k40\.com$ [NC]
+    RewriteRule ^ - [F]   # 403 Forbidden jika bukan host yg diizinkan
+
+    ErrorLog ${APACHE_LOG_DIR}/static_k40_error.log
+    CustomLog ${APACHE_LOG_DIR}/static_k40_access.log combined
+</VirtualHost>
+EOF
+
+a2ensite static.k40.com.conf >/dev/null 2>&1 || true
+a2dissite 000-default.conf   >/dev/null 2>&1 || true
+
+# Restart Apache (tanpa systemctl)
+service apache2 restart 2>/dev/null || apachectl -k restart
+
+# (Opsional) set resolver di host ini agar nama host lab resolve via ns1/ns2
+cat >/etc/resolv.conf <<'DNS'
+nameserver 192.231.3.2
+nameserver 192.231.3.3
+nameserver 192.168.122.1
+DNS
+
+# Tes: harus 200 OK dan menampilkan autoindex (Bukan 404/403)
+echo "== HTTP HEAD static.k40.com/annals/ =="
+curl -I http://static.k40.com/annals/ || true
+
+#Tes lain
+curl -I http://static.k40.com/annals/
+curl    http://static.k40.com/annals/
+```
+Ketika curl terlampir list file annals dan ketika masuk file kita bisa melihat isi file
+
+<img width="1055" height="618" alt="image" src="https://github.com/user-attachments/assets/7a9accfa-73c2-41a2-a5e6-af642580b05b" />
+
+## Soal 10
+Membuat web berbasis PHP-FPM dengan hostname app.k40.com. Apache dan PHP-FPM diinstal, modul proxy serta rewrite diaktifkan untuk menangani file PHP melalui socket FPM. Dua halaman dibuat `index.php` sebagai home dan `about.php` untuk halaman About, lalu `.htaccess` menambahkan aturan rewrite agar `/about` bisa diakses tanpa akhiran .php. VirtualHost dikonfigurasi agar hanya bisa diakses lewat hostname app.k40.com, bukan IP, dan menetapkan `index.php` sebagai halaman utama. Setelah konfigurasi diaktifkan dan Apache direstart, script menguji akses untuk memastikan kedua halaman berjalan dengan benar.
+
+```
+# === nomor 10: Vingilot (web dinamis PHP-FPM) ===
+# Hostname: app.k40.com  | Home: / (index.php) | About: /about (rewrite -> about.php)
+# Akses wajib via hostname (bukan IP)
+
+set -euo pipefail
+
+# Paksa APT IPv4 (kadang repo IPv6 bermasalah)
+echo 'Acquire::ForceIPv4 "true";' >/etc/apt/apt.conf.d/99force-ipv4
+apt-get clean; rm -rf /var/lib/apt/lists/*
+apt-get update -o Acquire::ForceIPv4=true
+
+# Install stack
+apt-get install -y apache2 php php-fpm libapache2-mod-fcgid curl
+
+# Aktifkan modul Apache
+a2enmod proxy >/dev/null 2>&1 || true
+a2enmod proxy_fcgi setenvif rewrite >/dev/null 2>&1 || true
+
+# Aktifkan conf php-fpm bawaan Debian (jika ada)
+a2enconf $(ls /etc/apache2/conf-available/ | grep -E '^php[0-9]+\.[0-9]+-fpm\.conf$' | head -n1) 2>/dev/null || true
+
+# Pastikan PHP-FPM berjalan (tanpa systemctl)
+PHP_SOCK="$(ls /run/php/php*-fpm.sock 2>/dev/null | head -n1 || true)"
+if [ -z "${PHP_SOCK}" ]; then
+  # coba start via skrip init yang tersedia
+  PHP_SVC="$(ls /etc/init.d/php*-fpm 2>/dev/null | head -n1 || true)"
+  if [ -n "${PHP_SVC}" ]; then
+    "${PHP_SVC}" restart || "${PHP_SVC}" start || true
+    sleep 1
+  else
+    # fallback langsung ke binary
+    PHP_BIN="$(command -v php-fpm8.3 || command -v php-fpm8.2 || command -v php-fpm8.1 || command -v php-fpm || true)"
+    [ -n "${PHP_BIN}" ] && "${PHP_BIN}" -D || true
+    sleep 1
+  fi
+  PHP_SOCK="$(ls /run/php/php*-fpm.sock 2>/dev/null | head -n1 || true)"
+fi
+if [ -z "${PHP_SOCK}" ]; then
+  echo "[ERR] PHP-FPM socket tidak ditemukan. Cek instalasi php-fpm."; exit 1
+fi
+
+# Dokumen
+mkdir -p /var/www/app.k40.com
+cat > /var/www/app.k40.com/index.php <<'EOF'
+<!DOCTYPE html><html><head><title>Vingilot - Home</title></head>
+<body>
+<h1>Selamat datang di Vingilot!</h1>
+<p>Ini adalah halaman beranda dari web dinamis.</p>
+<p><a href="/about">Tentang Kami</a></p>
+</body></html>
+EOF
+cat > /var/www/app.k40.com/about.php <<'EOF'
+<!DOCTYPE html><html><head><title>Tentang Vingilot</title></head>
+<body>
+<h1>Halaman About</h1>
+<p>Ini adalah halaman tentang Vingilot, kapal yang membawa cerita dinamis.</p>
+<p><a href="/">Kembali ke beranda</a></p>
+</body></html>
+EOF
+
+# Rewrite /about -> about.php
+cat > /var/www/app.k40.com/.htaccess <<'EOF'
+RewriteEngine On
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteRule ^about$ about.php [L]
+EOF
+
+# VHost: PHP-FPM via socket + enforce hostname
+cat > /etc/apache2/sites-available/app.k40.com.conf <<EOF
+<VirtualHost *:80>
+    ServerName app.k40.com
+    DocumentRoot /var/www/app.k40.com
+
+    <Directory /var/www/app.k40.com>
+        Options +FollowSymLinks
+        AllowOverride All
+        Require all granted
+    </Directory>
+
+    # Enforce akses via hostname (bukan IP)
+    RewriteEngine On
+    RewriteCond %{HTTP_HOST} !^app\.k40\.com$ [NC]
+    RewriteRule ^ - [F]
+
+    # Pastikan index.php menjadi default directory index
+    DirectoryIndex index.php
+
+    # PHP-FPM handler (unix socket)
+    <FilesMatch \.php$>
+        SetHandler "proxy:unix:${PHP_SOCK}|fcgi://localhost/"
+    </FilesMatch>
+
+    ErrorLog \${APACHE_LOG_DIR}/app_k40_error.log
+    CustomLog \${APACHE_LOG_DIR}/app_k40_access.log combined
+</VirtualHost>
+EOF
+
+a2ensite app.k40.com.conf >/dev/null 2>&1 || true
+a2dissite 000-default.conf  >/dev/null 2>&1 || true
+
+# Restart Apache (tanpa systemctl)
+service apache2 restart 2>/dev/null || apachectl -k restart
+
+# Tes lokal (pakai Host header, tanpa bergantung DNS)
+echo "== Detected PHP-FPM socket: ${PHP_SOCK} =="
+curl -I -H 'Host: app.k40.com' http://127.0.0.1/
+curl -I -H 'Host: app.k40.com' http://127.0.0.1/about
+```
+
+Ketika curl akan muncul status 200 yang berarti sudah berhasil di deploy
+
+<img width="720" height="266" alt="image" src="https://github.com/user-attachments/assets/173526d5-fd52-4dbe-95d6-8f4ef164b7de" />
