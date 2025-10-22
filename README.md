@@ -1,4 +1,4 @@
-<img width="1055" height="566" alt="image" src="https://github.com/user-attachments/assets/f9a70dd1-8d91-41fb-844b-2d0362eabe06" /># Laporan Resmi Jarkom-Modul-2-2025-K40
+# Modul-2-2025-K40
 ## Anggota Kelompok
 
 | No | Nama                   | NRP         |
