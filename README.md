@@ -1054,3 +1054,350 @@ curl -I -H 'Host: app.k40.com' http://127.0.0.1/about
 Ketika curl akan muncul status 200 yang berarti sudah berhasil di deploy
 
 <img width="720" height="266" alt="image" src="https://github.com/user-attachments/assets/173526d5-fd52-4dbe-95d6-8f4ef164b7de" />
+
+## Soal 11
+Langkah-langkah di Sirion: Install Nginx dan buat file konfigurasi /etc/nginx/sites-available/reverse_proxy dengan isi berikut, lalu aktifkan konfigurasi tersebut.
+```
+# Di Sirion
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+apt-get update
+apt-get install nginx -y
+
+cat > /etc/nginx/sites-available/reverse_proxy <<EOF
+server {
+    listen 80;
+    server_name www.k40.com sirion.k40.com;
+
+    location /static/ {
+        proxy_pass http://192.231.3.4/;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
+    location /app/ {
+        proxy_pass http://192.231.3.5/;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+EOF
+
+ln -s /etc/nginx/sites-available/reverse_proxy /etc/nginx/sites-enabled/
+rm /etc/nginx/sites-enabled/default
+nginx -t
+service nginx restart
+```
+Langkah-langkah di Vingilot: Edit file konfigurasi /etc/apache2/sites-available/app.k40.com.conf untuk menambahkan ServerAlias dan menghapus aturan redirect.
+```
+# Di Vingilot (/etc/apache2/sites-available/app.k40.com.conf)
+<VirtualHost *:80>
+    ServerName app.k40.com
+    ServerAlias www.k40.com
+
+    DocumentRoot /var/www/app.k40.com
+
+    <Directory /var/www/app.k40.com>
+        Options +FollowSymLinks
+        AllowOverride All
+        Require all granted
+    </Directory>
+
+    <FilesMatch \.php$>
+        SetHandler "proxy:unix:/run/php/php8.4-fpm.sock|fcgi://localhost/"
+    </FilesMatch>
+
+    ErrorLog ${APACHE_LOG_DIR}/app_k40_error.log
+    CustomLog ${APACHE_LOG_DIR}/app_k40_access.log combined
+</VirtualHost>
+```
+Di Vingilot (lanjutan)
+```
+service apache2 restart
+service php8.4-fpm start # Memastikan PHP-FPM berjalan setelah restart Apache
+```
+Verifikasi menggunakan curl "http://www.k40.com/static/annals/" dan "curl http://www.k40.com/app/" di terminal yang langsung terhubung dengan eonwe seperti foto berikut:
+
+<img width="915" height="294" alt="image" src="https://github.com/user-attachments/assets/879f59ce-6bf7-4ee8-b840-cf058657ac83" />
+
+## Soal 12
+Langkah-langkah di Sirion: Install apache2-utils untuk perintah htpasswd, buat file password /etc/nginx/.htpasswd dengan user admin (password diatur saat perintah dijalankan), lalu modifikasi konfigurasi Nginx untuk menambahkan blok location /admin yang menerapkan Basic Auth.
+```
+# Di Sirion
+apt-get update
+apt-get install apache2-utils -y
+
+# Buat file password, Anda akan diminta memasukkan password untuk 'admin'
+htpasswd -c /etc/nginx/.htpasswd admin
+
+# Edit konfigurasi Nginx
+# nano /etc/nginx/sites-available/reverse_proxy
+# Tambahkan blok location /admin { ... } seperti di bawah
+
+cat > /etc/nginx/sites-available/reverse_proxy <<EOF
+server {
+    listen 80;
+    server_name www.k40.com sirion.k40.com;
+
+    location /admin {
+        auth_basic "Restricted Content";
+        auth_basic_user_file /etc/nginx/.htpasswd;
+        proxy_pass http://192.231.3.5/;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
+    location /static/ {
+        proxy_pass http://192.231.3.4/;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
+    location /app/ {
+        proxy_pass http://192.231.3.5/;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+EOF
+
+nginx -t
+service nginx restart
+```
+Verifikasi dari Klien (misalnya Elrond): Gunakan curl untuk menguji akses ke /admin dalam tiga skenario: tanpa kredensial, dengan kredensial salah, dan dengan kredensial benar.
+```
+# Di Elrond
+curl -I http://www.k40.com/admin
+curl -I --user admin:oadijaijdaodajd http://www.k40.com/admin
+
+# 3. Dengan kredensial benar (Harus 200 OK)
+# Ganti 'password-benar' dengan password yang Anda buat
+curl -I --user admin:admin http://www.k40.com/admin
+```
+Dengan output seperti berikut:
+
+<img width="971" height="680" alt="image" src="https://github.com/user-attachments/assets/3925c417-b5c6-4777-b695-e1810860aeaa" />
+
+## Soal 13
+Langkah-langkah di Sirion: Modifikasi konfigurasi Nginx (/etc/nginx/sites-available/reverse_proxy) menjadi dua blok server. Blok pertama ditandai sebagai default_server untuk menangani akses via IP dan juga menangani nama sirion.k40.com, tugasnya hanya melakukan redirect 301. Blok kedua secara spesifik melayani nama domain kanonik www.k40.com dan berisi semua konfigurasi reverse proxy sebelumnya.
+```
+# Di Sirion
+# Edit file /etc/nginx/sites-available/reverse_proxy
+# Ganti isinya menjadi seperti di bawah
+
+cat > /etc/nginx/sites-available/reverse_proxy <<EOF
+# Blok 1: Redirect IP & sirion.k40.com
+server {
+    listen 80 default_server;
+    server_name sirion.k40.com;
+    return 301 http://www.k40.com\$request_uri;
+}
+
+# Blok 2: Melayani www.k40.com
+server {
+    listen 80;
+    server_name www.k40.com;
+
+    location /admin {
+        auth_basic "Restricted Content";
+        auth_basic_user_file /etc/nginx/.htpasswd;
+        proxy_pass http://192.231.3.5/;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
+    location /static/ {
+        proxy_pass http://192.231.3.4/;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
+    location /app/ {
+        proxy_pass http://192.231.3.5/;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+EOF
+
+nginx -t
+service nginx restart
+```
+Verifikasi di Elrond atau client yang nyambung dengan eonwe
+```
+curl -I http://192.231.3.6/app/
+curl -I http://sirion.k40.com/static/
+curl -I http://www.k40.com/app/
+```
+
+<img width="742" height="690" alt="image" src="https://github.com/user-attachments/assets/d83f6a4e-2c59-40f3-8201-0e51d6647f4d" />
+
+## Soal 14
+Pertama, definisikan format log baru bernama proxy di /etc/apache2/apache2.conf yang menggunakan header X-Forwarded-For sebagai IP klien. Kedua, ubah direktif CustomLog di /etc/apache2/sites-available/app.k40.com.conf agar menggunakan format proxy tersebut.
+```
+# Di Vingilot
+
+echo '' >> /etc/apache2/apache2.conf
+echo '# Custom log format for reverse proxy' >> /etc/apache2/apache2.conf
+echo 'LogFormat "%{X-Forwarded-For}i %l %u %t \"%r\" %>s %O \"%{Referer}i\" \"%{User-Agent}i\"" proxy' >> /etc/apache2/apache2.conf
+
+# Menggunakan sed untuk mengganti 'combined' menjadi 'proxy'
+sed -i 's/CustomLog \${APACHE_LOG_DIR}\/app_k40_access.log combined/CustomLog \${APACHE_LOG_DIR}\/app_k40_access.log proxy/' /etc/apache2/sites-available/app.k40.com.conf
+
+service apache2 restart
+```
+Lalu kita dapat melakukan verifikasi
+```
+# Di Elrond
+curl http://www.k40.com/app/
+
+# Di Vingilot
+tail -n 5 /var/log/apache2/app_k40_access.log
+```
+Output di terminal Elrond:
+
+<img width="912" height="199" alt="image" src="https://github.com/user-attachments/assets/e124538c-9e0c-4985-abe5-e2263db69864" />
+
+Output di terminal Vingilot:
+
+<img width="1126" height="357" alt="image" src="https://github.com/user-attachments/assets/c3b67ea0-6c3a-42bb-b0aa-254c69e56e04" />
+
+
+## Soal 15
+Langkah-langkah di Elrond: Install apache2-utils (yang berisi ab), lalu jalankan perintah ab untuk kedua endpoint.
+```
+# Di Elrond
+apt-get update
+apt-get install apache2-utils -y
+
+# Uji endpoint dinamis (/app/)
+ab -n 500 -c 10 http://www.k40.com/app/
+
+# Uji endpoint statis (/static/)
+ab -n 500 -c 10 http://www.k40.com/static/
+```
+Setelah merangkum output, tabelnya akan menjadi sebagai berikut:
+
+<img width="584" height="540" alt="image" src="https://github.com/user-attachments/assets/c172a2b8-40b9-46e7-a0b7-ae0082bf8a6c" />
+
+
+## Soal 16
+Verifikasi Kondisi Awal (di Elrond) Periksa resolusi DNS untuk static.k40.com sebelum ada perubahan.
+```
+dig static.k40.com +short
+```
+Dengan output sebagai berikut:
+
+<img width="573" height="120" alt="image" src="https://github.com/user-attachments/assets/3318e215-2d23-4823-b7f0-d05ff12bd885" />
+
+Edit file zona /etc/bind/jarkom/db.k40.com untuk menaikkan serial SOA menjadi 3, mengubah IP lindon menjadi 192.231.3.40, dan menambahkan TTL 30 pada record lindon dan static.
+```
+# Di Tirion
+# nano /etc/bind/jarkom/db.k40.com
+# Ganti isinya menjadi:
+cat > /etc/bind/jarkom/db.k40.com <<EOF
+\$TTL    604800
+@       IN      SOA     ns1.k40.com. root.k40.com. (
+                              3         ; Serial
+                         604800         ; Refresh
+                          86400         ; Retry
+                        2419200         ; Expire
+                         604800 )       ; Negative Cache TTL
+;
+@       IN      NS      ns1.k40.com.
+@       IN      NS      ns2.k40.com.
+
+k40.com.        IN      A       192.231.3.6
+ns1             IN      A       192.231.3.2
+ns2             IN      A       192.231.3.3
+sirion          IN      A       192.231.3.6
+lindon      30  IN      A       192.231.3.40
+vingilot        IN      A       192.231.3.5
+
+www             IN      CNAME   sirion.k40.com.
+static      30  IN      CNAME   lindon.k40.com.
+app             IN      CNAME   vingilot.k40.com.
+EOF
+
+service named restart
+```
+Verifikasi lagi:
+```
+# Di Valmar
+dig k40.com @localhost SOA
+```
+Dengan output sebagai berikut:
+
+<img width="1140" height="642" alt="image" src="https://github.com/user-attachments/assets/4e90f593-eff7-4734-92b3-5f7dcc1104c9" />
+
+Kalau kita cek kembali dengan command
+```
+# Di Elrond
+dig static.k40.com +short
+```
+Outputnya akan menjadi sebagai berikut (setelah 30 detik)
+
+<img width="586" height="88" alt="image" src="https://github.com/user-attachments/assets/37071198-d152-4e4d-b3dc-ffc28f17503b" />
+
+## Soal 17
+Pada setiap node yang relevan, jalankan perintah update-rc.d <nama_layanan> defaults untuk mengaktifkan autostart.
+```
+# Di Tirion
+update-rc.d named defaults
+
+# Di Valmar
+update-rc.d named defaults
+
+# Di Sirion
+update-rc.d nginx defaults
+
+# Di Lindon
+update-rc.d apache2 defaults
+
+# Di Vingilot
+update-rc.d php8.4-fpm defaults
+update-rc.d apache2 defaults
+```
+Semua node (Tirion, Valmar, Sirion, Lindon, Vingilot) dihentikan (Stop) lalu dinyalakan kembali (Start) melalui GNS3 dan nyalakan kembali service yang dibutuhkan.
+```
+# Di Tirion
+service named start
+
+# Di Valmar
+service named start
+
+# Di Vingilot
+service apache2 start
+service php8.4-fpm start
+
+# Di Sirion
+service nginx start
+```
+Lalu verifikasi kembali apakah berhasil atau tidak
+```
+# Di Elrond
+curl http://www.k40.com/app/
+```
+Dengan output sebagai berikut:
+
+<img width="910" height="233" alt="image" src="https://github.com/user-attachments/assets/c4053a8c-180f-4a2e-a5b2-8d2c0d737f7d" />
+
+## Soal 18
+
+
+
